@@ -10,5 +10,5 @@ add_subdirectory(latent_svm)
 add_subdirectory(mira)
 add_subdirectory(rampion)
 add_subdirectory(const_reorder)
-
+add_subdirectory(bandit)
 

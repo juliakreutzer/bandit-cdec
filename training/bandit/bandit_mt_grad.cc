@@ -12,11 +12,11 @@ bool InitCommandLine(int argc, char** argv, po::variables_map* conf) {
   ini.add_options()
         ("weights,w",po::value<string>(),"[REQD] Input feature weights file")
         ("input,i",po::value<string>(),"[REQD] Input source file for training")
-        ("passes,p", po::value<int>()->default_value(100), "Number of passes through the training data")
+        ("gradient_dump,d", po::value<string>(), "[REQD] path where to store weights, default: this dir")
+	("passes,p", po::value<int>()->default_value(100), "Number of passes through the training data")
         ("reference,r",po::value<vector<string> >(), "[REQD] Reference translation(s) (tokenized text file)")
         ("mt_metric,m",po::value<string>()->default_value("ibm_bleu"), "Scoring metric (ibm_bleu, nist_bleu, koehn_bleu, ter, combi)")
         ("objective",po::value<string>()->default_value("bayes"), "Objective for bandit optimization (bayes, duel, crossentropy")
-        ("dueldelta,dd",po::value<int>()->default_value(3),"Delta parameter for dueling bandits")
         ("sample_size,k",po::value<int>()->default_value(1),"Number of samples for each sentence")
         ("random_seed,S", po::value<uint32_t>(), "Random seed (if not specified, /dev/random will be used)")
         ("sample_from", po::value<string>()->default_value("hg"), "Sample from full hypergraph or k-best lists (hg, kbest)")
@@ -45,6 +45,12 @@ bool InitCommandLine(int argc, char** argv, po::variables_map* conf) {
 
   if (conf->count("help")) {
     cerr << "Bandit help:" << endl;
+    cerr << cl << endl;
+    return false;
+  }
+
+  if (!conf->count("gradient_dump")) {
+    cerr << "gradient dump is missing" << endl;
     cerr << cl << endl;
     return false;
   }
@@ -472,6 +478,10 @@ int main(int argc, char** argv) {
         viterbi = true;
     }
 
+    const string dump_dir = conf["gradient_dump"].as<string>();
+    cerr << "Writing full gradient to " << dump_dir << endl;
+
+
     vector<string> corpus;
     ReadTrainingCorpus(conf["input"].as<string>(), &corpus);
     
@@ -551,7 +561,7 @@ int main(int argc, char** argv) {
     SparseVector<double> truegrad;   
     
     while(line_count < max_passes*corpus.size()) {
-	cerr << "sent no" << line_count << endl;
+	cerr << "sent no " << line_count << " / " << corpus.size() << endl;
 
         decoder.SetId(cur_sent);
         sparse_weights.init_vector(&decoder_weights);        
@@ -626,11 +636,16 @@ int main(int argc, char** argv) {
     	}
 	
     }
-    truegrad /= truegrad.size();       
+    truegrad /= truegrad.size();  
+
+    ostringstream os;
+    os << dump_dir << ".txt";
+    vector<double> grad_vector;
+    truegrad.init_vector(grad_vector);
+    Weights::WriteToFile(os.str(), grad_vector, true);
+    cerr << "Wrote full gradient to " << os.str() << endl;
+     
     double gradnorm = truegrad.pnorm(2);
     cerr << "Norm of true gradient: " << gradnorm << endl;
     
-    
-
-    //TODO write best translations for dev set in output file or evaluate directly? 
 }

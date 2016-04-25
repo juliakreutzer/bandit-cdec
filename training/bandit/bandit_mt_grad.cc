@@ -354,9 +354,9 @@ vector<SparseVector<double>> ComputeGradients(SparseVector<double> sparse_weight
 	    if (score < clip){
 //		cerr << "to clip " << score << endl; 
 	    	score = clip;
-		cerr << "clipped " << score << endl;
+		//cerr << "clipped " << score << endl;
 	    }
-            cerr << "gain/p(y): " << gain << " / " << score << " = " << gain/score << endl;
+          //  cerr << "gain/p(y): " << gain << " / " << score << " = " << gain/score << endl;
             gradient *= gain; //division by score is left out for true gradient
             gradients.push_back(gradient);
         }
@@ -612,11 +612,13 @@ int main(int argc, char** argv) {
             cerr << "no valid objective given (bayes, crossentropy, pairwise, xpairwise)" << endl;
         }
 
-	//TODO collect gradient
+    //clip gradients to 10k largest features
+	//truegrad += clipWeights(gradient, 10000);    
 	truegrad += gradient;
-        
 
-	if (!silent) {
+    cerr << "#feat in grad: " << truegrad.size() << endl;
+
+    if (!silent) {
             cerr << "loss: " << feedback << endl;
             cerr << "x: ";
             print(cerr, x, "=", ",");
@@ -636,7 +638,7 @@ int main(int argc, char** argv) {
     	}
 	
     }
-    truegrad /= truegrad.size();  
+    truegrad /= corpus.size();  
 
     ostringstream os;
     os << dump_dir << ".txt";

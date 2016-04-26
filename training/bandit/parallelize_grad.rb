@@ -9,6 +9,8 @@ def usage
 end
 
 opts = Trollop::options do
+  opt :config, "bandit config file", :type => :string
+  opt :epochs, "number of epochs", :type => :int, :default => 1
   opt :lplp_args, "arguments for lplp.rb", :type => :string, :default => "l2 sum"
   opt :randomize, "randomize shards before each epoch", :type => :bool, :short => '-z', :default => false
   opt :reshard, "reshard after each epoch", :type => :bool, :short => '-y', :default => false
@@ -21,6 +23,7 @@ opts = Trollop::options do
   opt :extra_qsub, "extra qsub args", :type => :string, :default => ""
   opt :per_shard_decoder_configs, "give special decoder config per shard", :type => :string, :short => '-o'
   opt :first_input_weights, "input weights for first iter", :type => :string, :default => '', :short => '-w'
+  opt :features, "features for selection", :type => :string, :default => '', :short => '-f'
   opt :global_dir, "directory for global data", :type => :string, :short => '-g'
 end
 usage if not opts[:config]&&opts[:shards]&&opts[:input]&&opts[:references]
@@ -54,6 +57,7 @@ refs  = opts[:references]
 use_qsub       = opts[:qsub]
 shards_at_once = opts[:processes_at_once]
 first_input_weights  = opts[:first_input_weights]
+features = opts[:features]
 opts[:extra_qsub] = "-l #{opts[:extra_qsub]}" if opts[:extra_qsub]!=""
 if not opts[:global_dir]
   dir = Dir.pwd
@@ -61,7 +65,7 @@ else
   dir = opts[:global_dir]
 end
 
-`mkdir #{dir}/work`
+`mkdir -p #{dir}`
 
 def make_shards(input, refs, num_shards, epoch, rand, dir)
   lc = `wc -l #{input}`.split.first.to_i
@@ -85,10 +89,10 @@ def make_shards(input, refs, num_shards, epoch, rand, dir)
   0.upto(num_shards-1) { |shard|
     break if index.size==0
     new_num_shards += 1
-    in_fn = "#{dir}/work/shard.#{shard}.#{epoch}.in"
+    in_fn = "#{dir}/shard.#{shard}.#{epoch}.in"
     shard_in = File.new in_fn, 'w+'
     in_fns << in_fn
-    refs_fn = "#{dir}/work/shard.#{shard}.#{epoch}.refs"
+    refs_fn = "#{dir}/shard.#{shard}.#{epoch}.refs"
     shard_refs = File.new refs_fn, 'w+'
     refs_fns << refs_fn
     0.upto(shard_sz-1) { |i|
@@ -133,7 +137,8 @@ end
   puts "epoch #{epoch+1}"
   pids = []
   input_weights = ''
-  if epoch > 0 then input_weights = "--weights #{dir}/work/weights.#{epoch-1}" end
+  feature_weights = "--features #{features}"
+  if epoch > 0 then input_weights = "--weights #{dir}/weights.#{epoch-1}" end
   weights_files = []
   shard = 0
   remaining_shards = num_shards
@@ -143,11 +148,11 @@ end
       qsub_str_start = qsub_str_end = ''
       local_end = ''
       if use_qsub
-        qsub_str_start = "qsub #{opts[:extra_qsub]} -l h_vmem=8G -wd /scratch/kreutzer/ -sync y -b y -j y -o #{dir}/work/out.#{shard}.#{epoch} -N bandit.#{shard}.#{epoch} \""
+        qsub_str_start = "qsub #{opts[:extra_qsub]} -l h_vmem=8G -wd /scratch/kreutzer/ -sync y -b y -j y -o #{dir}/out.#{shard}.#{epoch} -N bandit.#{shard}.#{epoch} \""
         qsub_str_end = "\""
         local_end = ''
       else
-        local_end = "2>#{dir}/work/out.#{shard}.#{epoch}"
+        local_end = "2>#{dir}/out.#{shard}.#{epoch}"
       end
       if per_shard_decoder_configs
         cdec_cfg = "--decoder_config #{decoder_configs[shard]}"
@@ -158,14 +163,14 @@ end
         input_weights = "--weights #{first_input_weights}"
         puts "first input weights #{first_input_weights}"
       end
-      puts "call #{bandit_bin} -c #{ini} #{cdec_cfg} #{input_weights} --input #{input_files[shard]} --reference #{refs_files[shard]} --weights_dump #{dir}/work/weights.#{shard}.#{epoch}#{qsub_str_end} #{local_end}"
+      puts "call #{bandit_bin} -c #{ini} #{cdec_cfg} #{input_weights} #{feature_weights} --input #{input_files[shard]} --reference #{refs_files[shard]} --gradient_dump #{dir}/weights.#{shard}.#{epoch}#{qsub_str_end} #{local_end}"
       pids << Kernel.fork {
-        `#{qsub_str_start}#{bandit_bin} -c #{ini} #{cdec_cfg} #{input_weights}\
+        `#{qsub_str_start}#{bandit_bin} -c #{ini} #{cdec_cfg} #{input_weights} #{feature_weights}\
           --input #{input_files[shard]}\
           --reference #{refs_files[shard]}\
-          --weights_dump #{dir}/work/weights.#{shard}.#{epoch}#{qsub_str_end} #{local_end}`
+          --gradient_dump #{dir}/weights.#{shard}.#{epoch}#{qsub_str_end} #{local_end}`
       }
-      weights_files << "#{dir}/work/weights.#{shard}.#{epoch}"
+      weights_files << "#{dir}/weights.#{shard}.#{epoch}"
       shard += 1
       remaining_shards -= 1
     }
@@ -173,12 +178,12 @@ end
     pids.each { |pid| Process.wait(pid) }
     pids.clear
   end
-  `#{cat} #{dir}/work/weights.*.#{epoch}.txt > #{dir}/work/weights_cat`
-  `#{ruby} #{lplp_rb} #{lplp_args} #{num_shards} < #{dir}/work/weights_cat > #{dir}/work/weights.#{epoch}`
+  `#{cat} #{dir}/weights.*.#{epoch}.txt > #{dir}/weights_cat`
+  `#{ruby} #{lplp_rb} #{lplp_args} #{num_shards} < #{dir}/weights_cat > #{dir}/weights.#{epoch}`
   if rand and reshard and epoch+1!=epochs
     input_files, refs_files, num_shards = make_shards input, refs, num_shards, epoch+1, rand
   end
 }
 
-`rm #{dir}/work/weights_cat`
+`rm #{dir}/weights_cat`
 

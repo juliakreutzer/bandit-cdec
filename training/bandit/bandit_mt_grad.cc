@@ -11,7 +11,8 @@ bool InitCommandLine(int argc, char** argv, po::variables_map* conf) {
   po::options_description ini("Configuration options");
   ini.add_options()
         ("weights,w",po::value<string>(),"[REQD] Input feature weights file")
-        ("input,i",po::value<string>(),"[REQD] Input source file for training")
+       	("features,f",po::value<string>(),"Features for feature selection")
+	 ("input,i",po::value<string>(),"[REQD] Input source file for training")
         ("gradient_dump,d", po::value<string>(), "[REQD] path where to store weights, default: this dir")
 	("passes,p", po::value<int>()->default_value(100), "Number of passes through the training data")
         ("reference,r",po::value<vector<string> >(), "[REQD] Reference translation(s) (tokenized text file)")
@@ -22,8 +23,7 @@ bool InitCommandLine(int argc, char** argv, po::variables_map* conf) {
         ("sample_from", po::value<string>()->default_value("hg"), "Sample from full hypergraph or k-best lists (hg, kbest)")
         ("decoder_config",po::value<string>(),"Decoder configuration file")
         ("banditverbose,v", "verbose output, for debugging")
-        ("viterbi, vi", "report viterbi translations")
-	("clip, x", po::value<double>()->default_value(0.01), "clip sample prob to this value");
+        ("viterbi, vi", "report viterbi translations") ;
   po::options_description cl("Command line options");
   cl.add_options()
         ("config,c", po::value<string>(), "Bandit configuration file")
@@ -61,6 +61,14 @@ bool InitCommandLine(int argc, char** argv, po::variables_map* conf) {
     cerr << cl << endl;
     return false;
   }
+
+  if (!conf->count("features")) {
+    cerr << "features are missing!" << endl;
+    cerr << cl << endl;
+    return false;
+  }
+
+
  
   if (!conf->count("input")) {
     cerr << "input is missing!" << endl;
@@ -304,6 +312,12 @@ SparseVector<double> RMS(SparseVector<double> accumulated, SparseVector<double> 
     return accumulated;
 }
 
+//features must be a vector of ones
+SparseVector<double> SelectFeatures(SparseVector<double> weights, SparseVector<double> features){
+	//cerr << "#feat " << weights.size() << endl;
+	return ElementwiseProduct(features, weights);
+}
+
 bool compareGreater(int i,int j) { return (i>j); }
 
 SparseVector<double> clipWeights(SparseVector<double> weights, int k){
@@ -320,7 +334,7 @@ SparseVector<double> clipWeights(SparseVector<double> weights, int k){
 }
 
 //gradient: feedback * (y_tilde - avg_x) (bayes)
-vector<SparseVector<double>> ComputeGradients(SparseVector<double> sparse_weights, SparseVector<double> avg_x, prob_t z, vector<HypothesisInfo> y_tildes, double &feedback, string objective, double clip){
+vector<SparseVector<double>> ComputeGradients(SparseVector<double> sparse_weights, SparseVector<double> avg_x, prob_t z, vector<HypothesisInfo> y_tildes, double &feedback, string objective, double clip, SparseVector<double> features){
     vector<SparseVector<double>> gradients;
     feedback = 0.0;
     //cerr << "Sample BLEUs:" << endl;
@@ -336,6 +350,7 @@ vector<SparseVector<double>> ComputeGradients(SparseVector<double> sparse_weight
             gradient -= avg_x;
             gradient *= 1-y_tildes[i].mt_metric_score; //feedback
             gradient *= score; //just for true gradient
+	    gradient = SelectFeatures(gradient, features);
             gradients.push_back(gradient);
         }
     }
@@ -351,13 +366,8 @@ vector<SparseVector<double>> ComputeGradients(SparseVector<double> sparse_weight
             gradient *= -1;
             gradient += avg_x;
             double gain = y_tildes[i].mt_metric_score; //feedback
-	    if (score < clip){
-//		cerr << "to clip " << score << endl; 
-	    	score = clip;
-		//cerr << "clipped " << score << endl;
-	    }
-          //  cerr << "gain/p(y): " << gain << " / " << score << " = " << gain/score << endl;
             gradient *= gain; //division by score is left out for true gradient
+	    gradient = SelectFeatures(gradient, features);
             gradients.push_back(gradient);
         }
     }
@@ -367,7 +377,7 @@ vector<SparseVector<double>> ComputeGradients(SparseVector<double> sparse_weight
 
 
 //compute gradients for objectives where more than one feature vector is involved
-vector<SparseVector<double>> ComputeGradientsPairwise(SparseVector<double> sparse_weights, SparseVector<double> sparse_weights2, SparseVector<double> avg_1,SparseVector<double> avg_2, prob_t z1, prob_t z2, vector<HypothesisInfo> y_tildes1, vector<HypothesisInfo> y_tildes2, double &feedback, string objective){
+vector<SparseVector<double>> ComputeGradientsPairwise(SparseVector<double> sparse_weights, SparseVector<double> sparse_weights2, SparseVector<double> avg_1,SparseVector<double> avg_2, prob_t z1, prob_t z2, vector<HypothesisInfo> y_tildes1, vector<HypothesisInfo> y_tildes2, double &feedback, string objective,  SparseVector<double> features){
     vector<SparseVector<double>> gradients;
     feedback = 0.0;
     if (objective == "pairwise"){
@@ -391,11 +401,13 @@ vector<SparseVector<double>> ComputeGradientsPairwise(SparseVector<double> spars
                 SparseVector<double> avg_diff = avg_1 - avg_2;
                 x_diff -= avg_diff; //sampled minus expected
 		x_diff *= score; //only for true gradient
+		x_diff = SelectFeatures(x_diff, features);
+		cerr << "pw #feat " << x_diff.size() << endl;
                 gradients.push_back(x_diff);
             }                
-            else{
-                gradients.push_back(SetToValue(avg_1,0)); //no change
-            }
+//            else{
+//                gradients.push_back(SetToValue(avg_1,0)); //no change
+ //           }
             
             //cerr << "bleu_1 " << bleu_1 << endl;
             //cerr << "bleu_2 " << bleu_2 << endl;
@@ -429,11 +441,12 @@ vector<SparseVector<double>> ComputeGradientsPairwise(SparseVector<double> spars
 			score += pow(10,-20); //prevent division by 0	
 		}
 		avg_diff *= gain; //no division by score for true gradient
+		avg_diff = SelectFeatures(avg_diff, features);
                 gradients.push_back(avg_diff);
             }
-            else{
-                gradients.push_back(SetToValue(avg_1,0)); //no change
-            }
+   //         else{
+    //            gradients.push_back(SetToValue(avg_1,0)); //no change
+    //        }
 
            // cerr << "bleu_1 " << bleu_1 << endl;
            // cerr << "bleu_2 " << bleu_2 << endl;
@@ -537,6 +550,14 @@ int main(int argc, char** argv) {
     weight_string = p.filename().string();
     Weights::InitSparseVector(decoder_weights, &sparse_weights);
   
+    //read in features to be selected
+    vector<double> features_dense; 
+    SparseVector<double> features;
+    Weights::InitFromFile(conf["features"].as<string>(), &features_dense);
+    cerr << "Loaded weights from " << conf["features"].as<string>() << endl;
+    Weights::InitSparseVector(features_dense, &features);
+    features = SetToValue(features, 1.0);
+
     //initialize bandit parameters
     SparseVector<double> exp_feats;
     
@@ -583,7 +604,7 @@ int main(int argc, char** argv) {
             prob_t z = observer.GetZ();
             double numberOfPaths = observer.GetNumberOfPaths();
             avg_x = observer.GetFeatureExpectation();//compute avg_x = feature expectation via inside-outside
-            vector<SparseVector<double>> gradients = ComputeGradients(sparse_weights, avg_x, z, y_tildes, feedback, objective, clip);
+            vector<SparseVector<double>> gradients = ComputeGradients(sparse_weights, avg_x, z, y_tildes, feedback, objective, clip, features);
             for (int i=0; i<gradients.size(); i++){ 
                 gradient += gradients[i]; //sum gradients from all samples
             }        
@@ -601,7 +622,7 @@ int main(int argc, char** argv) {
             SparseVector<double> sparse_weights2 = sparse_weights;
             sparse_weights2 *= -1;
         
-            vector<SparseVector<double>> gradients = ComputeGradientsPairwise(sparse_weights, sparse_weights2, avg_1, avg_2, z1, z2, y_tildes1, y_tildes2, feedback, objective);
+            vector<SparseVector<double>> gradients = ComputeGradientsPairwise(sparse_weights, sparse_weights2, avg_1, avg_2, z1, z2, y_tildes1, y_tildes2, feedback, objective, features);
             for (int i=0; i<gradients.size(); i++){
                 gradient += gradients[i]; //sum gradients from all samples
             }
@@ -638,16 +659,16 @@ int main(int argc, char** argv) {
     	}
 	
     }
-    truegrad /= corpus.size();  
+    //truegrad /= corpus.size();  
 
     ostringstream os;
     os << dump_dir << ".txt";
     vector<double> grad_vector;
     truegrad.init_vector(grad_vector);
     Weights::WriteToFile(os.str(), grad_vector, true);
-    cerr << "Wrote full gradient to " << os.str() << endl;
+    cerr << "Wrote gradient sum to " << os.str() << endl;
      
-    double gradnorm = truegrad.pnorm(2);
-    cerr << "Norm of true gradient: " << gradnorm << endl;
+    //double gradnorm = truegrad.pnorm(2);
+    //cerr << "Norm of true gradient: " << gradnorm << endl;
     
 }

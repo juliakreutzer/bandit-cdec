@@ -16,6 +16,7 @@ bool InitCommandLine(int argc, char** argv, po::variables_map* conf) {
         ("reference,r",po::value<vector<string> >(), "[REQD] Reference translation(s) (tokenized text file)")
         ("mt_metric,m",po::value<string>()->default_value("ibm_bleu"), "Scoring metric (ibm_bleu, nist_bleu, koehn_bleu, ter, combi)")
         ("objective",po::value<string>()->default_value("bayes"), "Objective for bandit optimization (bayes, duel, crossentropy")
+ 	("feedback_type", po::value<string>()->default_value("binary"), "Feedback type for pairwise objective (binary, continuous, always)")
         ("dueldelta,dd",po::value<int>()->default_value(3),"Delta parameter for dueling bandits")
         ("learning_rate,g", po::value<double>()->default_value(3), "Learning rate = 10**(-g)")
         ("sample_size,k",po::value<int>()->default_value(1),"Number of samples for each sentence")
@@ -380,25 +381,49 @@ vector<SparseVector<double>> ComputeGradients(SparseVector<double> sparse_weight
 
 
 //compute gradients for objectives where more than one feature vector is involved
-vector<SparseVector<double>> ComputeGradientsPairwise(SparseVector<double> sparse_weights, SparseVector<double> sparse_weights2, SparseVector<double> avg_1,SparseVector<double> avg_2, prob_t z1, prob_t z2, vector<HypothesisInfo> y_tildes1, vector<HypothesisInfo> y_tildes2, double &feedback, string objective){
+vector<SparseVector<double>> ComputeGradientsPairwise(SparseVector<double> sparse_weights, SparseVector<double> sparse_weights2, SparseVector<double> avg_1,SparseVector<double> avg_2, prob_t z1, prob_t z2, vector<HypothesisInfo> y_tildes1, vector<HypothesisInfo> y_tildes2, double &feedback, string objective, string feedback_type){
     vector<SparseVector<double>> gradients;
     feedback = 0.0;
+    double pair_feedback = 0.0;
     if (objective == "pairwise"){
         for (int i=0; i<y_tildes1.size(); i++){ //compare samples one by one
             double bleu_1 = y_tildes1[i].mt_metric_score;
             double bleu_2 = y_tildes2[i].mt_metric_score;
-            
-            if (bleu_2 > bleu_1){
-                feedback += 1;
-                SparseVector<double> x_diff = y_tildes1[i].features - y_tildes2[i].features;
+            cerr << "bleu_1 " << bleu_1 << endl;
+            cerr << "bleu_2 " << bleu_2 << endl;
+	    if (feedback_type != "always"){
+            	if (bleu_2 > bleu_1){
+
+			if (feedback_type == "binary"){
+				pair_feedback = 1;
+			}
+			else{
+				pair_feedback = (bleu_2 - bleu_1);  //continuous feedback: difference in bleu scores if misranked
+			}
+			feedback += pair_feedback;
+			cerr << "feedback: " << pair_feedback << endl;
+ 
+			SparseVector<double> x_diff = y_tildes1[i].features - y_tildes2[i].features;
+        	        SparseVector<double> avg_diff = avg_1 - avg_2;
+                	x_diff -= avg_diff; //sampled minus expected
+                	x_diff *= pair_feedback;
+                	gradients.push_back(x_diff);
+            	}                
+            	else{
+                	gradients.push_back(SetToValue(avg_1,0)); //no change
+            	}
+            }
+	    else { //always update by difference of bleus
+		pair_feedback = (bleu_2 - bleu_1); //is positive when misranked, negative when correctly ranked
+		feedback += pair_feedback;
+                cerr << "feedback: " << pair_feedback << endl;
+		SparseVector<double> x_diff = y_tildes1[i].features - y_tildes2[i].features;
                 SparseVector<double> avg_diff = avg_1 - avg_2;
                 x_diff -= avg_diff; //sampled minus expected
+                x_diff *= pair_feedback;
                 gradients.push_back(x_diff);
-            }                
-            else{
-                gradients.push_back(SetToValue(avg_1,0)); //no change
-            }
-            
+	    }
+
             //cerr << "bleu_1 " << bleu_1 << endl;
             //cerr << "bleu_2 " << bleu_2 << endl;
             
@@ -528,6 +553,9 @@ int main(int argc, char** argv) {
 	cerr << "clipping sample probability (crossentropy) to " << clip << endl;
     }
 
+    const string feedback_type = conf["feedback_type"].as<string>();
+    cerr << "Feedback type for pairwise: " << feedback_type << endl;
+
     DocumentScorer ds(metric, conf["reference"].as<vector<string>>());
     cerr << "Loaded " << ds.size() << " references for scoring with " << metric_name << endl;
     if (ds.size() != corpus.size()) {
@@ -539,7 +567,7 @@ int main(int argc, char** argv) {
     ReadFile ini_rf(conf["decoder_config"].as<string>());
     Decoder decoder(ini_rf.stream());
     cerr << "Read config from file " << conf["decoder_config"].as<string>() << endl;
-    boost::filesystem3::path q(conf["decoder_config"].as<string>());
+    boost::filesystem::path q(conf["decoder_config"].as<string>());
     string config_string = q.filename().string();
 
     //initialize weights
@@ -548,7 +576,7 @@ int main(int argc, char** argv) {
     string weight_string;
     Weights::InitFromFile(conf["weights"].as<string>(), &decoder_weights);
     cerr << "Loaded weights from " << conf["weights"].as<string>() << endl;
-    boost::filesystem3::path p(conf["weights"].as<string>());
+    boost::filesystem::path p(conf["weights"].as<string>());
     weight_string = p.filename().string();
     Weights::InitSparseVector(decoder_weights, &sparse_weights);
   
@@ -682,7 +710,7 @@ int main(int argc, char** argv) {
             SparseVector<double> sparse_weights2 = sparse_weights;
             sparse_weights2 *= -1;
         
-            vector<SparseVector<double>> gradients = ComputeGradientsPairwise(sparse_weights, sparse_weights2, avg_1, avg_2, z1, z2, y_tildes1, y_tildes2, feedback, objective);
+            vector<SparseVector<double>> gradients = ComputeGradientsPairwise(sparse_weights, sparse_weights2, avg_1, avg_2, z1, z2, y_tildes1, y_tildes2, feedback, objective, feedback_type);
             for (int i=0; i<gradients.size(); i++){
                 if (normalize){
                     gradients[i] *= 1/numberOfPaths;

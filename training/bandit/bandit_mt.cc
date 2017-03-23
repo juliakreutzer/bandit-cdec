@@ -754,7 +754,7 @@ int main(int argc, char** argv) {
             }
 
             if (feedback > feedback_map){
-                gradient = sampled_weights;
+                gradient = -sampled_weights;
                 if (normalize){
                     gradient *= 1/numberOfPaths;
                 }
